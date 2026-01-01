@@ -106,12 +106,20 @@ private:
     uint32_t currentFrame = 0;
 
     std::chrono::steady_clock::time_point startTime;
+    bool framebufferResized = false;
+
+    static void framebufferResizeCallback(GLFWwindow* window, int width, int height) {
+        auto app = reinterpret_cast<VkRGBCube*>(glfwGetWindowUserPointer(window));
+        app->framebufferResized = true;
+    }
 
     void initWindow() {
         glfwInit();
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-        glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+        glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
         window = glfwCreateWindow(WIDTH, HEIGHT, "vkrgbcube - Render Pass Test", nullptr, nullptr);
+        glfwSetWindowUserPointer(window, this);
+        glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
     }
 
     void initVulkan() {
@@ -140,22 +148,7 @@ private:
         vkDeviceWaitIdle(device);
     }
 
-    void cleanup() {
-        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-            vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
-            vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
-            vkDestroyFence(device, inFlightFences[i], nullptr);
-        }
-
-        vkDestroyBuffer(device, uiVertexBuffer, nullptr);
-        vkFreeMemory(device, uiVertexBufferMemory, nullptr);
-        vkDestroyBuffer(device, cubeIndexBuffer, nullptr);
-        vkFreeMemory(device, cubeIndexBufferMemory, nullptr);
-        vkDestroyBuffer(device, cubeVertexBuffer, nullptr);
-        vkFreeMemory(device, cubeVertexBufferMemory, nullptr);
-
-        vkDestroyCommandPool(device, commandPool, nullptr);
-
+    void cleanupSwapChain() {
         for (auto framebuffer : worldFramebuffers)
             vkDestroyFramebuffer(device, framebuffer, nullptr);
         for (auto framebuffer : uiFramebuffers)
@@ -177,6 +170,45 @@ private:
             vkDestroyImageView(device, imageView, nullptr);
 
         vkDestroySwapchainKHR(device, swapChain, nullptr);
+    }
+
+    void recreateSwapChain() {
+        int width = 0, height = 0;
+        glfwGetFramebufferSize(window, &width, &height);
+        while (width == 0 || height == 0) {
+            glfwGetFramebufferSize(window, &width, &height);
+            glfwWaitEvents();
+        }
+
+        vkDeviceWaitIdle(device);
+
+        cleanupSwapChain();
+
+        createSwapChain();
+        createImageViews();
+        createDepthResources();
+        createRenderPasses();
+        createGraphicsPipelines();
+        createFramebuffers();
+    }
+
+    void cleanup() {
+        cleanupSwapChain();
+
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
+            vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
+            vkDestroyFence(device, inFlightFences[i], nullptr);
+        }
+
+        vkDestroyBuffer(device, uiVertexBuffer, nullptr);
+        vkFreeMemory(device, uiVertexBufferMemory, nullptr);
+        vkDestroyBuffer(device, cubeIndexBuffer, nullptr);
+        vkFreeMemory(device, cubeIndexBufferMemory, nullptr);
+        vkDestroyBuffer(device, cubeVertexBuffer, nullptr);
+        vkFreeMemory(device, cubeVertexBufferMemory, nullptr);
+
+        vkDestroyCommandPool(device, commandPool, nullptr);
         vkDestroyDevice(device, nullptr);
         vkDestroySurfaceKHR(instance, surface, nullptr);
         vkDestroyInstance(instance, nullptr);
@@ -1179,7 +1211,14 @@ private:
         vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
 
         uint32_t imageIndex;
-        vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
+        VkResult result = vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
+
+        if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+            recreateSwapChain();
+            return;
+        } else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+            throw std::runtime_error("Failed to acquire swap chain image");
+        }
 
         vkResetFences(device, 1, &inFlightFences[currentFrame]);
 
@@ -1214,7 +1253,14 @@ private:
         presentInfo.pSwapchains = swapChains;
         presentInfo.pImageIndices = &imageIndex;
 
-        vkQueuePresentKHR(presentQueue, &presentInfo);
+        result = vkQueuePresentKHR(presentQueue, &presentInfo);
+
+        if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || framebufferResized) {
+            framebufferResized = false;
+            recreateSwapChain();
+        } else if (result != VK_SUCCESS) {
+            throw std::runtime_error("Failed to present swap chain image");
+        }
 
         currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
